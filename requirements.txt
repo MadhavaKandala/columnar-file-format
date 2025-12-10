@@ -1,0 +1,2 @@
+# Columnar File Format Requirements
+# No external dependencies - uses only Python stdlib
