@@ -1,0 +1,11 @@
+id,name,age,salary,city,department,experience
+1,Alice Johnson,32,85000.50,New York,Engineering,5
+2,Bob Smith,28,72000.00,San Francisco,Sales,3
+3,Charlie Brown,45,95000.75,Chicago,Management,10
+4,Diana Prince,26,65000.25,Boston,Design,2
+5,Edward Norton,38,88000.00,Seattle,Engineering,8
+6,Fiona Apple,35,79000.50,Austin,Marketing,6
+7,George Harris,41,92000.75,Portland,Management,9
+8,Hannah Montana,24,58000.00,Denver,Support,1
+9,Ivan Drago,48,105000.25,Miami,Executive,12
+10,Julia Roberts,30,76000.50,Atlanta,Design,4
