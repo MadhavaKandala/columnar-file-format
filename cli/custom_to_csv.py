@@ -1,4 +1,4 @@
-custom_to_csv.py# cli/custom_to_csv.py
+# cli/custom_to_csv.py
 import argparse
 import csv
 from typing import List, Optional
@@ -7,13 +7,12 @@ from columnar.reader import read_as_rows
 
 
 def main():
-Add custom_to_csv CLI tool        description="Convert custom columnar file to CSV"
-    )
-    parser.add_argument("input_file", help="Input custom file path")
-    parser.add_argument("output_csv", help="Output CSV file path")
+    parser = argparse.ArgumentParser(description="Convert columnar to CSV")
+    parser.add_argument("input_file", help="Input columnar file")
+    parser.add_argument("output_csv", help="Output CSV file")
     parser.add_argument(
         "--columns",
-        help="Comma-separated list of columns to read (for column pruning)",
+        help="Comma-separated columns to read",
         default=None,
     )
 
@@ -26,6 +25,7 @@ Add custom_to_csv CLI tool        description="Convert custom columnar file to C
     if not rows:
         with open(args.output_csv, "w", newline="", encoding="utf-8") as f:
             pass
+        print(f"✅ Empty CSV written to {args.output_csv}")
         return
 
     fieldnames = list(rows[0].keys())
@@ -34,6 +34,7 @@ Add custom_to_csv CLI tool        description="Convert custom columnar file to C
         writer.writeheader()
         for r in rows:
             writer.writerow(r)
+    print(f"✅ Converted {args.input_file} -> {args.output_csv}")
 
 
 if __name__ == "__main__":
