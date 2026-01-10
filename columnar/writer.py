@@ -1,11 +1,12 @@
-# columnar/writer.py
 import csv
 import struct
 from typing import List, Dict, Any, Iterable, Tuple
 
 from .format_header import (
     ColumnMeta,
-    build_header,
+    pack_file_header,
+    pack_column_meta,
+    HEADER_SIZE,
     TYPE_INT32,
     TYPE_FLOAT64,
     TYPE_STRING,
@@ -58,79 +59,85 @@ def write_from_rows(
 ) -> None:
     """
     Write custom columnar file from iterable of row dicts.
-
-    schema: list of (name, logical_type) where logical_type in {"int32","float64","string"}.
     """
-    # materialize rows (task is small-scale)
+    # Materialize rows
     rows = list(rows)
     num_rows = len(rows)
 
-    # collect per-column values
+    # Collect per-column values
     columns_data: Dict[str, List[Any]] = {name: [] for name, _ in schema}
     for row in rows:
         for name, _typ in schema:
             columns_data[name].append(row.get(name))
 
-    # build column blocks
-    column_metas: List[ColumnMeta] = []
+    # 1. Encode and Compress Data Blocks
     blocks: Dict[str, bytes] = {}
-
-    # header will be written first; we do a two-pass:
-    # 1) encode & compress columns
-    # 2) compute offsets (after header length is known)
+    col_info: List[Dict] = []
+    
     for name, logical_type in schema:
+        type_id, _ = TYPE_MAP[logical_type]
         raw_bytes = _encode_column(columns_data[name], logical_type)
         comp_bytes = compress_block(raw_bytes)
+        
         blocks[name] = comp_bytes
+        col_info.append({
+            "name": name,
+            "type_id": type_id,
+            "compressed_size": len(comp_bytes),
+            "uncompressed_size": len(raw_bytes)
+        })
 
-    # dummy metas
-    dummy_metas: List[ColumnMeta] = []
-
-    for name, logical_type in schema:
-        type_id, _fmt = TYPE_MAP[logical_type]
-        comp_bytes = blocks[name]
-        if logical_type == "int32":
-            uncomp_size = 4 * num_rows
-        elif logical_type == "float64":
-            uncomp_size = 8 * num_rows
-        else:
-            uncomp_size = len(_encode_column(columns_data[name], logical_type))
-        dummy_metas.append(
-            ColumnMeta(
-                name=name,
-                type_id=type_id,
-                offset=0,
-                compressed_size=len(comp_bytes),
-                uncompressed_size=uncomp_size,
-            )
+    # 2. Calculate Offsets
+    # Layout: [FILE HEADER 32B] [METADATA SECTION] [DATA SECTION]
+    
+    metadata_offset = HEADER_SIZE
+    
+    # Calculate size of metadata section to find where data section starts
+    # We need to create temporary ColumnMeta objects to check packed size, 
+    # but data_offset isn't known yet.
+    # However, pack_column_meta size depends only on name length.
+    
+    current_meta_offset = metadata_offset
+    for info in col_info:
+        # Size = 4(NameLen) + NameLen + 1(Type) + 8(Comp) + 8(Uncomp) + 8(Offset)
+        #      = 29 + len(name)
+        meta_size = 29 + len(info["name"].encode("utf-8"))
+        current_meta_offset += meta_size
+        
+    data_start_offset = current_meta_offset
+    
+    # 3. Create Final ColumnMeta objects with correct Data Offsets
+    final_metas: List[ColumnMeta] = []
+    current_data_offset = data_start_offset
+    
+    for info in col_info:
+        meta = ColumnMeta(
+            name=info["name"],
+            type_id=info["type_id"],
+            compressed_size=info["compressed_size"],
+            uncompressed_size=info["uncompressed_size"],
+            data_offset=current_data_offset
         )
+        final_metas.append(meta)
+        current_data_offset += info["compressed_size"]
 
-    # first header to estimate size
-    dummy_header_bytes = build_header(num_rows, dummy_metas)
-    header_size = len(dummy_header_bytes)
-
-    # now compute real offsets
-    offset = header_size
-    real_metas: List[ColumnMeta] = []
-    for meta in dummy_metas:
-        real_metas.append(
-            ColumnMeta(
-                name=meta.name,
-                type_id=meta.type_id,
-                offset=offset,
-                compressed_size=meta.compressed_size,
-                uncompressed_size=meta.uncompressed_size,
-            )
-        )
-        offset += meta.compressed_size
-
-    # final header
-    header_bytes = build_header(num_rows, real_metas)
-
-    # write file
+    # 4. Write to File
     with open(file_path, "wb") as f:
+        # Write File Header
+        header_bytes = pack_file_header(
+            num_columns=len(final_metas),
+            num_rows=num_rows,
+            metadata_offset=metadata_offset,
+            data_offset=data_start_offset
+        )
         f.write(header_bytes)
-        for meta in real_metas:
+        
+        # Write Metadata Section
+        for meta in final_metas:
+            f.write(pack_column_meta(meta))
+            
+        # Write Data Section
+        for meta in final_metas:
             f.write(blocks[meta.name])
 
 

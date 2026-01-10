@@ -1,109 +1,123 @@
-# columnar/format_header.py
 import struct
 from dataclasses import dataclass
-from typing import List, Dict
+from typing import List
 
-MAGIC = b"COLD"  # 4 bytes magic
+MAGIC = b"COLM"  # 4 bytes magic
 VERSION = 1
 ENDIAN = "<"  # little-endian
 
-# Data type ids (align to your SPEC)
+# Section 1: File Header (32 bytes)
+# Magic(4) + Version(4) + ColumnCount(4) + RowCount(4) + MetadataOffset(8) + DataOffset(8)
+HEADER_STRUCT = struct.Struct(ENDIAN + "4s I I I Q Q")
+HEADER_SIZE = HEADER_STRUCT.size
+
+# Data Type Identifiers from SPEC
 TYPE_INT32 = 1
 TYPE_FLOAT64 = 2
 TYPE_STRING = 3
-
 
 @dataclass
 class ColumnMeta:
     name: str
     type_id: int
-    offset: int
     compressed_size: int
     uncompressed_size: int
-
+    data_offset: int  # SPEC calls this DataOffset in metadata block
 
 @dataclass
 class FileHeader:
     version: int
+    num_columns: int
     num_rows: int
-    columns: List[ColumnMeta]
+    metadata_offset: int
+    data_offset: int
 
+def pack_file_header(num_columns: int, num_rows: int, metadata_offset: int, data_offset: int) -> bytes:
+    """Pack the 32-byte file header."""
+    return HEADER_STRUCT.pack(
+        MAGIC,
+        VERSION,
+        num_columns,
+        num_rows,
+        metadata_offset,
+        data_offset
+    )
 
-def build_header(num_rows: int, columns: List[ColumnMeta]) -> bytes:
-    """
-    Serialize header to bytes.
-    Layout (all little-endian; adjust to SPEC if different):
-
-    magic[4] + version(u8) + num_rows(u64) + num_cols(u32) +
-    repeated:
-      name_len(u16) + name(bytes) +
-      type_id(u8) +
-      offset(u64) +
-      compressed_size(u64) +
-      uncompressed_size(u64)
-    """
-    buf = bytearray()
-    buf += MAGIC
-    buf += struct.pack(ENDIAN + "B", VERSION)
-    buf += struct.pack(ENDIAN + "Q", num_rows)
-    buf += struct.pack(ENDIAN + "I", len(columns))
-
-    for col in columns:
-        name_bytes = col.name.encode("utf-8")
-        buf += struct.pack(ENDIAN + "H", len(name_bytes))
-        buf += name_bytes
-        buf += struct.pack(ENDIAN + "B", col.type_id)
-        buf += struct.pack(ENDIAN + "Q", col.offset)
-        buf += struct.pack(ENDIAN + "Q", col.compressed_size)
-        buf += struct.pack(ENDIAN + "Q", col.uncompressed_size)
-
-    return bytes(buf)
-
-
-def parse_header(raw: bytes) -> FileHeader:
-    """
-    Parse header bytes back into FileHeader.
-    """
-    mv = memoryview(raw)
-    pos = 0
-
-    magic = mv[pos:pos + 4].tobytes()
+def unpack_file_header(data: bytes) -> FileHeader:
+    """Unpack the 32-byte file header."""
+    if len(data) != HEADER_SIZE:
+        raise ValueError(f"Header must be {HEADER_SIZE} bytes")
+    
+    magic, ver, n_cols, n_rows, meta_off, data_off = HEADER_STRUCT.unpack(data)
+    
     if magic != MAGIC:
-        raise ValueError("Invalid magic number")
-    pos += 4
+        raise ValueError(f"Invalid magic number: {magic!r}")
+    if ver != VERSION:
+        raise ValueError(f"Unsupported version: {ver}")
+        
+    return FileHeader(
+        version=ver,
+        num_columns=n_cols,
+        num_rows=n_rows,
+        metadata_offset=meta_off,
+        data_offset=data_off
+    )
 
-    (version,) = struct.unpack_from(ENDIAN + "B", mv, pos)
-    pos += 1
+def pack_column_meta(col: ColumnMeta) -> bytes:
+    """
+    Pack a single column metadata block.
+    Format:
+    NameLength (uint32)
+    ColumnName (UTF-8 bytes)
+    DataType (uint8)
+    CompressedSize (uint64)
+    UncompressedSize (uint64)
+    DataOffset (uint64)
+    """
+    name_bytes = col.name.encode("utf-8")
+    name_len = len(name_bytes)
+    
+    # 4 + name_len + 1 + 8 + 8 + 8 = 29 + name_len
+    # Struct: I {name_len}s B Q Q Q
+    fmt = ENDIAN + f"I{name_len}sBQQQ"
+    return struct.pack(
+        fmt,
+        name_len,
+        name_bytes,
+        col.type_id,
+        col.compressed_size,
+        col.uncompressed_size,
+        col.data_offset
+    )
 
-    (num_rows,) = struct.unpack_from(ENDIAN + "Q", mv, pos)
-    pos += 8
-
-    (num_cols,) = struct.unpack_from(ENDIAN + "I", mv, pos)
-    pos += 4
-
-    columns: List[ColumnMeta] = []
-    for _ in range(num_cols):
-        (name_len,) = struct.unpack_from(ENDIAN + "H", mv, pos)
-        pos += 2
-        name = mv[pos:pos + name_len].tobytes().decode("utf-8")
-        pos += name_len
-
-        (type_id,) = struct.unpack_from(ENDIAN + "B", mv, pos)
-        pos += 1
-
-        offset, comp_size, uncomp_size = struct.unpack_from(
-            ENDIAN + "QQQ", mv, pos
-        )
-        pos += 8 * 3
-
-        columns.append(
-            ColumnMeta(
-                name=name,
-                type_id=type_id,
-                offset=offset,
-                compressed_size=comp_size,
-                uncompressed_size=uncomp_size,
-            )
-        )
-
-    return FileHeader(version=version, num_rows=num_rows, columns=columns)
+def unpack_column_meta(data: bytes, offset: int) -> tuple[ColumnMeta, int]:
+    """
+    Unpack a single column metadata block from data at offset.
+    Returns (ColumnMeta, bytes_consumed).
+    """
+    mv = memoryview(data)
+    # Read NameLength (4 bytes)
+    (name_len,) = struct.unpack_from(ENDIAN + "I", mv, offset)
+    current_pos = offset + 4
+    
+    # Read Name
+    name_bytes = mv[current_pos : current_pos + name_len].tobytes()
+    name = name_bytes.decode("utf-8")
+    current_pos += name_len
+    
+    # Read rest: Type(1) + CompSize(8) + UncompSize(8) + DataOffset(8)
+    rest_fmt = ENDIAN + "BQQQ"
+    rest_size = struct.calcsize(rest_fmt)
+    
+    type_id, comp_size, uncomp_size, data_off = struct.unpack_from(rest_fmt, mv, current_pos)
+    current_pos += rest_size
+    
+    meta = ColumnMeta(
+        name=name,
+        type_id=type_id,
+        compressed_size=comp_size,
+        uncompressed_size=uncomp_size,
+        data_offset=data_off
+    )
+    
+    return meta, (current_pos - offset)
